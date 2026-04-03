@@ -1,0 +1,155 @@
+---
+# -------------------------------------------------------
+# Ansible Playbook: Configure EC2 for DevOps Practice
+# Run with: ansible-playbook -i inventory.ini install_docker.yml
+# -------------------------------------------------------
+
+- name: Configure DevOps Practice Server
+  hosts: devops_server
+  become: yes   # run as sudo
+  vars:
+    app_image: "tukrim/devops-practice-app:latest"
+    app_port: 5000
+
+  tasks:
+
+    # ---- SYSTEM UPDATE ----
+    - name: Update apt package cache
+      apt:
+        update_cache: yes
+        cache_valid_time: 3600
+
+    - name: Install required system packages
+      apt:
+        name:
+          - apt-transport-https
+          - ca-certificates
+          - curl
+          - gnupg
+          - lsb-release
+          - python3-pip
+        state: present
+
+    # ---- INSTALL DOCKER ----
+    - name: Add Docker GPG key
+      apt_key:
+        url: https://download.docker.com/linux/ubuntu/gpg
+        state: present
+
+    - name: Add Docker repository
+      apt_repository:
+        repo: "deb [arch=amd64] https://download.docker.com/linux/ubuntu {{ ansible_distribution_release }} stable"
+        state: present
+
+    - name: Install Docker CE
+      apt:
+        name:
+          - docker-ce
+          - docker-ce-cli
+          - containerd.io
+        state: present
+        update_cache: yes
+
+    - name: Start and enable Docker service
+      systemd:
+        name: docker
+        state: started
+        enabled: yes
+
+    - name: Add ubuntu user to docker group
+      user:
+        name: ubuntu
+        groups: docker
+        append: yes
+
+    # ---- INSTALL PROMETHEUS NODE EXPORTER ----
+    - name: Download Node Exporter
+      get_url:
+        url: "https://github.com/prometheus/node_exporter/releases/download/v1.7.0/node_exporter-1.7.0.linux-amd64.tar.gz"
+        dest: /tmp/node_exporter.tar.gz
+
+    - name: Extract Node Exporter
+      unarchive:
+        src: /tmp/node_exporter.tar.gz
+        dest: /tmp/
+        remote_src: yes
+
+    - name: Copy Node Exporter binary
+      copy:
+        src: /tmp/node_exporter-1.7.0.linux-amd64/node_exporter
+        dest: /usr/local/bin/node_exporter
+        mode: '0755'
+        remote_src: yes
+
+    - name: Create Node Exporter systemd service
+      copy:
+        content: |
+          [Unit]
+          Description=Prometheus Node Exporter
+          After=network.target
+
+          [Service]
+          User=nobody
+          ExecStart=/usr/local/bin/node_exporter
+          Restart=on-failure
+
+          [Install]
+          WantedBy=multi-user.target
+        dest: /etc/systemd/system/node_exporter.service
+
+    - name: Start and enable Node Exporter
+      systemd:
+        name: node_exporter
+        state: started
+        enabled: yes
+        daemon_reload: yes
+
+    # ---- RUN FLASK APP CONTAINER ----
+    - name: Pull Flask app Docker image
+      docker_image:
+        name: "{{ app_image }}"
+        source: pull
+
+    - name: Run Flask app container
+      docker_container:
+        name: flask-app
+        image: "{{ app_image }}"
+        state: started
+        restart_policy: always
+        ports:
+          - "{{ app_port }}:5000"
+
+    # ---- RUN PROMETHEUS ----
+    - name: Copy Prometheus config to server
+      copy:
+        src: ../monitoring/prometheus.yml
+        dest: /tmp/prometheus.yml
+
+    - name: Run Prometheus container
+      docker_container:
+        name: prometheus
+        image: prom/prometheus:latest
+        state: started
+        restart_policy: always
+        ports:
+          - "9090:9090"
+        volumes:
+          - /tmp/prometheus.yml:/etc/prometheus/prometheus.yml
+
+    # ---- RUN GRAFANA ----
+    - name: Run Grafana container
+      docker_container:
+        name: grafana
+        image: grafana/grafana:latest
+        state: started
+        restart_policy: always
+        ports:
+          - "3000:3000"
+
+    - name: Print completion message
+      debug:
+        msg:
+          - "✅ Setup complete!"
+          - "App running at port 5000"
+          - "Prometheus at port 9090"
+          - "Grafana at port 3000 (admin/admin)"

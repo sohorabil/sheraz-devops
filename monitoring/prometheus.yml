@@ -1,0 +1,31 @@
+# -------------------------------------------------------
+# Prometheus Configuration
+# Scrapes metrics from Node Exporter on the EC2 instance
+# -------------------------------------------------------
+
+global:
+  scrape_interval: 15s       # How often to scrape targets
+  evaluation_interval: 15s   # How often to evaluate rules
+
+scrape_configs:
+
+  # Prometheus monitors itself
+  - job_name: "prometheus"
+    static_configs:
+      - targets: ["localhost:9090"]
+
+  # Node Exporter — system metrics (CPU, RAM, Disk)
+  # Replace EC2_PUBLIC_IP with your actual EC2 IP
+  - job_name: "node_exporter"
+    static_configs:
+      - targets: ["EC2_PUBLIC_IP:9100"]
+        labels:
+          instance: "devops-practice-server"
+
+  # Flask App health endpoint
+  - job_name: "flask_app"
+    metrics_path: "/health"
+    static_configs:
+      - targets: ["EC2_PUBLIC_IP:5000"]
+        labels:
+          app: "devops-practice-app"

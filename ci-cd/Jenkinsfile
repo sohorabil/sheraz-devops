@@ -1,0 +1,125 @@
+// -------------------------------------------------------
+// Jenkinsfile — DevOps Practice CI/CD Pipeline
+// -------------------------------------------------------
+// Prerequisites in Jenkins:
+//   - Credential ID "dockerhub-credentials" (Docker Hub username + password)
+//   - Credential ID "ec2-ssh-key" (SSH private key for EC2)
+//   - Environment variable EC2_PUBLIC_IP set in Jenkins or below
+// -------------------------------------------------------
+
+pipeline {
+
+    agent any
+
+    environment {
+        DOCKERHUB_USER    = "your-dockerhub-username"       // ← CHANGE THIS
+        IMAGE_NAME        = "devops-practice-app"
+        IMAGE_TAG         = "${BUILD_NUMBER}"                // auto-increments each build
+        FULL_IMAGE        = "${DOCKERHUB_USER}/${IMAGE_NAME}:${IMAGE_TAG}"
+        LATEST_IMAGE      = "${DOCKERHUB_USER}/${IMAGE_NAME}:latest"
+        EC2_IP            = "your-ec2-public-ip"            // ← CHANGE THIS after terraform apply
+        EC2_USER          = "ubuntu"
+        APP_PORT          = "5000"
+    }
+
+    stages {
+
+        // ---- STAGE 1: Checkout ----
+        stage("Checkout Code") {
+            steps {
+                echo "📥 Checking out code from GitHub..."
+                checkout scm
+            }
+        }
+
+        // ---- STAGE 2: Build Docker Image ----
+        stage("Build Docker Image") {
+            steps {
+                echo "🐳 Building Docker image: ${FULL_IMAGE}"
+                sh """
+                    docker build -f docker/Dockerfile -t ${FULL_IMAGE} -t ${LATEST_IMAGE} .
+                """
+            }
+        }
+
+        // ---- STAGE 3: Push to Docker Hub ----
+        stage("Push to Docker Hub") {
+            steps {
+                echo "📤 Pushing image to Docker Hub..."
+                withCredentials([usernamePassword(
+                    credentialsId: "dockerhub-credentials",
+                    usernameVariable: "DOCKER_USER",
+                    passwordVariable: "DOCKER_PASS"
+                )]) {
+                    sh """
+                        echo $DOCKER_PASS | docker login -u $DOCKER_USER --password-stdin
+                        docker push ${FULL_IMAGE}
+                        docker push ${LATEST_IMAGE}
+                    """
+                }
+            }
+        }
+
+        // ---- STAGE 4: Deploy to EC2 via SSH ----
+        stage("Deploy to EC2") {
+            steps {
+                echo "🚀 Deploying to EC2 at ${EC2_IP}..."
+                withCredentials([sshUserPrivateKey(
+                    credentialsId: "ec2-ssh-key",
+                    keyFileVariable: "SSH_KEY"
+                )]) {
+                    sh """
+                        ssh -i ${SSH_KEY} -o StrictHostKeyChecking=no ${EC2_USER}@${EC2_IP} '
+                            echo "Pulling latest image..."
+                            docker pull ${LATEST_IMAGE}
+
+                            echo "Stopping old container (if running)..."
+                            docker stop flask-app || true
+                            docker rm flask-app || true
+
+                            echo "Starting new container..."
+                            docker run -d \\
+                                --name flask-app \\
+                                --restart always \\
+                                -p ${APP_PORT}:5000 \\
+                                ${LATEST_IMAGE}
+
+                            echo "✅ Deployment complete!"
+                            docker ps
+                        '
+                    """
+                }
+            }
+        }
+
+        // ---- STAGE 5: Health Check ----
+        stage("Health Check") {
+            steps {
+                echo "🏥 Running health check..."
+                sh """
+                    sleep 5
+                    curl -f http://${EC2_IP}:${APP_PORT}/health || exit 1
+                    echo "✅ App is healthy!"
+                """
+            }
+        }
+    }
+
+    post {
+        success {
+            echo """
+            ✅ Pipeline completed successfully!
+            App URL:      http://${EC2_IP}:${APP_PORT}
+            Prometheus:   http://${EC2_IP}:9090
+            Grafana:      http://${EC2_IP}:3000
+            Build:        #${BUILD_NUMBER}
+            """
+        }
+        failure {
+            echo "❌ Pipeline failed! Check the logs above."
+        }
+        always {
+            sh "docker logout || true"
+        }
+    }
+}
